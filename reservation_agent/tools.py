@@ -51,19 +51,9 @@ def init_connection_pool() -> None:
 init_connection_pool()
 
 
-def get_user_id_from_context(tool_context: ToolContext) -> str | None:
-    """Helper function to retrieve user_id from ToolContext."""
-    user_id = None
-    if tool_context and tool_context.state:
-        user_id = tool_context.state.get("user_id_from_oauth")  # Primary method
-
-    # Fallback or alternative methods if your ADK setup provides user_id differently
-    # For example, if user_id is directly on tool_context or in auth_response:
-    # if not user_id and tool_context and hasattr(tool_context, 'user_id'):
-    #     user_id = tool_context.user_id
-    # if not user_id and tool_context and tool_context.auth_response:
-    # user_id = tool_context.auth_response.get("user_id") # Or relevant field
-
+def get_user_id_from_context(tool_context: ToolContext) -> str:
+    """Helper function to retrieve user_id from context."""
+    user_id = tool_context.state["user_id"]  
     return user_id
 
 
