@@ -1,28 +1,23 @@
 # agent.py
 from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
-from tools import get_user_reservation_by_id, get_latest_user_reservations, cleanup_connector
+
+from .tools import (
+    get_latest_user_reservations,
+    get_user_reservation_by_id,
+)
 
 # --- Tool for fetching a specific reservation by ID ---
 # Note that same descriptions would need to be provided in MCP Toolbox YAML
-fetch_reservation_by_id_tool = FunctionTool(
-    fn=get_user_reservation_by_id,
-    description="Fetches a specific reservation for the authenticated user using its unique reservation ID. "
-                "Use this if the user provides a reservation ID or asks for details of one specific reservation. "
-                "The function expects 'reservation_id' as an argument.",
-)
+fetch_reservation_by_id_tool = FunctionTool(get_user_reservation_by_id)
 
 # --- Tool for fetching the latest reservations ---
 # Note that same descriptions would need to be provided in MCP Toolbox YAML
-fetch_latest_reservations_tool = FunctionTool(
-    fn=get_latest_user_reservations,
-    description="Fetches the 3 most recent reservations for the authenticated user. "
-                "Use this if the user asks for their latest, newest, or recent reservations.",
-)
+fetch_latest_reservations_tool = FunctionTool(get_latest_user_reservations)
 
 # Define the LLM Agent
-reservations_agent = LlmAgent(
-    model="gemini-pro", # Or your preferred Gemini model
+root_agent = LlmAgent(
+    model="gemini-2.5-pro-preview-03-25",
     name="ReservationsInquiryAgent",
     description="An agent that can look up a user's reservations, either a specific one by ID or their latest ones.",
     instruction=(
@@ -36,10 +31,5 @@ reservations_agent = LlmAgent(
         "If no reservations are found, inform the user politely. "
         "Present any reservation details clearly."
     ),
-    tools=[
-        fetch_reservation_by_id_tool,
-        fetch_latest_reservations_tool
-    ],
+    tools=[fetch_reservation_by_id_tool, fetch_latest_reservations_tool],
 )
-
-root_agent = reservations_agent
