@@ -5,7 +5,10 @@ import asyncpg  # type: ignore
 import sqlalchemy
 from google.adk.tools import ToolContext  # For accessing user context
 from google.cloud.sql.connector import Connector, IPTypes
+from opentelemetry import trace
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+tracer = trace.get_tracer("gcp.vertex.agent")
 
 # note: the use of global state here introduces a potential race condition as
 # access and initializing connector / engine is only protected by the GIL
@@ -59,26 +62,34 @@ async def get_user_reservation_by_id(
     'reservation_id' as an argument.
     """
     # HERE IS WHERE user_id IS PASSED TO THE QUERY AS AN ARGUMENT INVISIBLE TO THE LLM.
-    tool_context.request_credential
-    user_id = get_user_id_from_context(tool_context)
-    if not user_id:
-        return {"error": "I can only look up reservations if you're logged in,"}
+    with tracer.start_as_current_span("validate-user-id") as span:
+        tool_context.request_credential
+        user_id = get_user_id_from_context(tool_context)
 
-    if not reservation_id:
-        return {"error": "Reservation ID was not provided."}
+        span.set_attribute("user_id", user_id)
 
-    pool = await get_engine()
-    async with pool.connect() as conn:
-        # Pass user_id from context into the the query
-        result = await conn.execute(
-            sqlalchemy.text(
-                "SELECT id, user_id, reservation_details, reservation_date "
-                "FROM reservations "
-                "WHERE id = :reservation_id_param AND user_id = :user_id_param"
-            ),
-            {"reservation_id_param": reservation_id, "user_id_param": user_id},
-        )
-        reservation = result.fetchone()
+        if not user_id:
+            return {"error": "I can only look up reservations if you're logged in,"}
+
+        if not reservation_id:
+            return {"error": "Reservation ID was not provided."}
+
+    with tracer.start_span("get-engine") as span:
+        pool = await get_engine()
+
+    with tracer.start_as_current_span("pool-connect"):
+        async with pool.connect() as conn:
+            with tracer.start_as_current_span("pool-execute"):
+                # Pass user_id from context into the the query
+                result = await conn.execute(
+                    sqlalchemy.text(
+                        "SELECT id, user_id, reservation_details, reservation_date "
+                        "FROM reservations "
+                        "WHERE id = :reservation_id_param AND user_id = :user_id_param"
+                    ),
+                    {"reservation_id_param": reservation_id, "user_id_param": user_id},
+                )
+                reservation = result.fetchone()
 
     if not reservation:
         return {
@@ -98,35 +109,40 @@ async def get_latest_user_reservations(tool_context: ToolContext) -> dict:
     Use this if the user asks for their latest, newest, or recent
     reservations.
     """
-    user_id = get_user_id_from_context(tool_context)
-    if not user_id:
-        return {"error": "I was unable to find any reservations under your name."}
+    with tracer.start_as_current_span("validate-user-id") as span:
+        user_id = get_user_id_from_context(tool_context)
+        if not user_id:
+            return {"error": "I was unable to find any reservations under your name."}
 
     reservations_data: list[dict] = []
 
-    pool = await get_engine()
-    async with pool.connect() as conn:
-        # pass user_id from context into the the query
-        result = await conn.execute(
-            sqlalchemy.text(
-                "SELECT id, user_id, reservation_details, reservation_date "
-                "FROM reservations "
-                "WHERE user_id = :user_id_param "
-                "ORDER BY reservation_date DESC "
-                "LIMIT 3"
-            ),
-            {"user_id_param": user_id},
-        )
+    with tracer.start_span("get-engine") as span:
+        pool = await get_engine()
+    
+    with tracer.start_as_current_span("pool-connect"):
+        async with pool.connect() as conn:
+            with tracer.start_as_current_span("pool-execute"):
+                # pass user_id from context into the the query
+                result = await conn.execute(
+                    sqlalchemy.text(
+                        "SELECT id, user_id, reservation_details, reservation_date "
+                        "FROM reservations "
+                        "WHERE user_id = :user_id_param "
+                        "ORDER BY reservation_date DESC "
+                        "LIMIT 3"
+                    ),
+                    {"user_id_param": user_id},
+                )
 
-        for row in result:
-            reservations_data.append(
-                {
-                    "id": row.id,
-                    "user_id": row.user_id,
-                    "details": row.reservation_details,
-                    "date": str(row.reservation_date),
-                }
-            )
+                for row in result:
+                    reservations_data.append(
+                        {
+                            "id": row.id,
+                            "user_id": row.user_id,
+                            "details": row.reservation_details,
+                            "date": str(row.reservation_date),
+                        }
+                    )
 
     if not reservations_data:
         return {"message": f"No reservations found for user {user_id}."}
