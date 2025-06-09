@@ -1,63 +1,58 @@
 # tools.py
 import os  # For accessing environment variables
 
+import asyncpg  # type: ignore
 import sqlalchemy
 from google.adk.tools import ToolContext  # For accessing user context
 from google.cloud.sql.connector import Connector, IPTypes
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-# Global connector and engine to manage the connection pool
+# note: the use of global state here introduces a potential race condition as
+# access and initializing connector / engine is only protected by the GIL
 connector = None
 engine = None
-SessionLocal = None
 
 
-def init_connection_pool() -> None:
-    """Initializes the Cloud SQL connection pool."""
-    global connector, engine, SessionLocal
+async def get_engine() -> AsyncEngine:
+    global connector, engine
 
-    if engine:  # Already initialized
-        return
-
-    connector = Connector()
-
-    def getconn() -> sqlalchemy.engine.base.Connection:
-        assert connector is not None
+    if not engine:
         conn_kwargs = {
             "user": os.environ.get("DB_USER"),
             "password": os.environ.get("DB_PASSWORD"),
             "db": os.environ.get("DB_NAME"),
         }
+        connector = Connector()
 
-        conn = connector.connect(
-            os.environ.get("CLOUD_SQL_INSTANCE_CONNECTION_NAME", ""),
-            "pg8000",
-            ip_type=IPTypes.PUBLIC,
-            **conn_kwargs,
+        async def getconn() -> asyncpg.Connection:
+            conn = await connector.connect_async(  # type: ignore
+                os.environ.get("CLOUD_SQL_INSTANCE_CONNECTION_NAME", ""),
+                "asyncpg",
+                ip_type=IPTypes.PUBLIC,
+                **conn_kwargs,
+            )
+            return conn
+
+        engine = create_async_engine(
+            "postgresql+asyncpg://",
+            async_creator=getconn,
+            pool_size=5,
+            max_overflow=2,
+            pool_timeout=30,
+            pool_recycle=1800,
         )
-        return conn
-
-    engine = sqlalchemy.create_engine(
-        f"postgresql+pg8000://",
-        creator=getconn,
-        pool_size=5,
-        max_overflow=2,
-        pool_timeout=30,
-        pool_recycle=1800,
-    )
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-
-init_connection_pool()
+    return engine
 
 
 def get_user_id_from_context(tool_context: ToolContext) -> str:
     """Helper function to retrieve user_id from context."""
-    user_id = tool_context.state["user_id"]  
+    user_id = tool_context.state["user_id"]
     return user_id
 
 
-def get_user_reservation_by_id(tool_context: ToolContext, reservation_id: str) -> dict:
+async def get_user_reservation_by_id(
+    tool_context: ToolContext, reservation_id: str
+) -> dict:
     """Fetches a specific reservation for the authenticated user using its
     unique reservation ID. Use this if the user provides a reservation ID or
     asks for details of one specific reservation. The function expects
@@ -72,55 +67,33 @@ def get_user_reservation_by_id(tool_context: ToolContext, reservation_id: str) -
     if not reservation_id:
         return {"error": "Reservation ID was not provided."}
 
-    if not SessionLocal:
-        return {"error": "Database session not initialized."}
-
-    db = SessionLocal()
-    try:
-        # Ensure reservation_id can be cast to integer if your DB column is an integer type
-        try:
-            # Assuming reservation_id in the database is an integer.
-            # If it's a string, this conversion is not needed, but ensure your query matches.
-            reservation_id_int = int(reservation_id)
-        except ValueError:
-            return {
-                "error": f"Invalid reservation ID format: {reservation_id}. Expected an integer or numeric string."
-            }
-
-        stmt = sqlalchemy.text(
-            "SELECT id, user_id, reservation_details, reservation_date "
-            "FROM reservations "
-            "WHERE id = :reservation_id_param AND user_id = :user_id_param"
-        )
+    pool = await get_engine()
+    async with pool.connect() as conn:
         # Pass user_id from context into the the query
-        result = db.execute(
-            stmt, {"reservation_id_param": reservation_id_int, "user_id_param": user_id}
+        result = await conn.execute(
+            sqlalchemy.text(
+                "SELECT id, user_id, reservation_details, reservation_date "
+                "FROM reservations "
+                "WHERE id = :reservation_id_param AND user_id = :user_id_param"
+            ),
+            {"reservation_id_param": reservation_id, "user_id_param": user_id},
         )
         reservation = result.fetchone()
 
-        if reservation:
-            return {
-                "id": reservation.id,
-                "user_id": reservation.user_id,
-                "details": reservation.reservation_details,
-                "date": str(reservation.reservation_date),
-            }
-        else:
-            return {
-                "message": f"No reservation found with ID {reservation_id} in your name."
-            }
+    if not reservation:
+        return {
+            "message": f"No reservation found with ID {reservation_id} in your name."
+        }
 
-    except sqlalchemy.exc.SQLAlchemyError as e:
-        print(f"Database query error: {e}")
-        return {"error": f"An error occurred while fetching the reservation: {str(e)}"}
-    except AttributeError as e:
-        print(f"Data attribute error: {e}. Check column names.")
-        return {"error": f"Error processing reservation data: {str(e)}"}
-    finally:
-        db.close()
+    return {
+        "id": reservation.id,
+        "user_id": reservation.user_id,
+        "details": reservation.reservation_details,
+        "date": str(reservation.reservation_date),
+    }
 
 
-def get_latest_user_reservations(tool_context: ToolContext) -> dict:
+async def get_latest_user_reservations(tool_context: ToolContext) -> dict:
     """Fetches the 3 most recent reservations for the authenticated user.
     Use this if the user asks for their latest, newest, or recent
     reservations.
@@ -129,22 +102,22 @@ def get_latest_user_reservations(tool_context: ToolContext) -> dict:
     if not user_id:
         return {"error": "I was unable to find any reservations under your name."}
 
-    if not SessionLocal:
-        return {"error": "Database session not initialized."}
+    reservations_data: list[dict] = []
 
-    db = SessionLocal()
-    reservations_data = []
-    try:
-        # Fetch the 3 latest reservations, ordered by reservation_date descending
-        stmt = sqlalchemy.text(
-            "SELECT id, user_id, reservation_details, reservation_date "
-            "FROM reservations "
-            "WHERE user_id = :user_id_param "
-            "ORDER BY reservation_date DESC "
-            "LIMIT 3"
+    pool = await get_engine()
+    async with pool.connect() as conn:
+        # pass user_id from context into the the query
+        result = await conn.execute(
+            sqlalchemy.text(
+                "SELECT id, user_id, reservation_details, reservation_date "
+                "FROM reservations "
+                "WHERE user_id = :user_id_param "
+                "ORDER BY reservation_date DESC "
+                "LIMIT 3"
+            ),
+            {"user_id_param": user_id},
         )
 
-        result = db.execute(stmt, {"user_id_param": user_id})
         for row in result:
             reservations_data.append(
                 {
@@ -155,17 +128,7 @@ def get_latest_user_reservations(tool_context: ToolContext) -> dict:
                 }
             )
 
-        if not reservations_data:
-            return {"message": f"No reservations found for user {user_id}."}
-        return {"reservations": reservations_data}
+    if not reservations_data:
+        return {"message": f"No reservations found for user {user_id}."}
 
-    except sqlalchemy.exc.SQLAlchemyError as e:
-        print(f"Database query error: {e}")
-        return {
-            "error": f"An error occurred while fetching latest reservations: {str(e)}"
-        }
-    except AttributeError as e:
-        print(f"Data attribute error: {e}. Check column names.")
-        return {"error": f"Error processing reservation data: {str(e)}"}
-    finally:
-        db.close()
+    return {"reservations": reservations_data}
