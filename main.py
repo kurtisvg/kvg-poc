@@ -30,7 +30,7 @@ from reservation_agent import agent
 async def run_prompt(
     runner: InMemoryRunner, session: Session, user_id: str, new_message: str
 ):
-    """Helper function to run a prompt for this user."""
+    """Helper function to run a prompt."""
     content = types.Content(role="user", parts=[types.Part.from_text(text=new_message)])
     print("** User says:", content.model_dump(exclude_none=True))
     async for event in runner.run_async(
@@ -50,20 +50,24 @@ async def main():
         agent=agent.root_agent,
         app_name=app_name,
     )
+
+    # WARNING: don't use 'user:id' as that will cause the token to persist the rest of
+    # the session for the user
+    state = {"user_token": os.environ.get("MY_OAUTH2_TOKEN")}
+
     session = await runner.session_service.create_session(
-        app_name=app_name, user_id=user_id
+        app_name=app_name, user_id=user_id, state=state
     )
 
-    start_time = time.time()
-    print("Start time:", start_time)
-    print("------------------------------------")
+    session.state["user:id"] = "user_123"
+
     await run_prompt(runner, session, user_id, "Hi")
     await run_prompt(runner, session, user_id, "Please lookup my recent reservations.")
 
 
 if __name__ == "__main__":
     # ADK doesn't provide a way to configure telemetry without adding a custom runner
-    
+
     project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
     if not project_id:
         raise ValueError("GOOGLE_CLOUD_PROJECT environment variable is not set.")

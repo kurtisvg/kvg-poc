@@ -1,10 +1,14 @@
 # tools.py
-import os  # For accessing environment variables
+import asyncio
+import os
 
 import asyncpg  # type: ignore
 import sqlalchemy
-from google.adk.tools import ToolContext  # For accessing user context
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.tools import ToolContext
+from google.auth.transport import requests
 from google.cloud.sql.connector import Connector, IPTypes
+from google.oauth2 import id_token
 from opentelemetry import trace
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -14,6 +18,11 @@ tracer = trace.get_tracer("gcp.vertex.agent")
 # access and initializing connector / engine is only protected by the GIL
 connector = None
 engine = None
+
+LOGGED_IN_KEY = "logged_in"
+USER_TOKEN_KEY = "user_token"
+USER_ID_KEY = "user_id"
+TOKEN_INFO_KEY = "id_token_info"
 
 
 async def get_engine() -> AsyncEngine:
@@ -47,9 +56,35 @@ async def get_engine() -> AsyncEngine:
     return engine
 
 
+async def validate_oauth2_token(callback_context: CallbackContext):
+    token = callback_context.state.get(USER_TOKEN_KEY)
+    if not token:
+        callback_context.state[LOGGED_IN_KEY] = False
+        return
+
+    def validate_oauth2_token():
+        req = requests.Request()
+        return id_token.verify_oauth2_token(token, req)
+
+    # TODO: Client ID has to get passed in here to be properly secure!
+    idinfo = await asyncio.get_running_loop().run_in_executor(
+        None, validate_oauth2_token
+    )
+
+    # WARNING: DON'T USE `user:` prefix because that will authenticate the user
+    # for persistent sessions after the user has expired
+    callback_context.state[LOGGED_IN_KEY] = True
+    callback_context.state[TOKEN_INFO_KEY] = idinfo
+
+
 def get_user_id_from_context(tool_context: ToolContext) -> str:
     """Helper function to retrieve user_id from context."""
-    user_id = tool_context.state["user_id"]
+    print(tool_context.state.to_dict())
+    if not tool_context.state.get(LOGGED_IN_KEY):
+        return "user must be logged in to use this tool"
+
+    # hard code the user since it's not a real app
+    user_id = "user_123"
     return user_id
 
 
@@ -118,7 +153,7 @@ async def get_latest_user_reservations(tool_context: ToolContext) -> dict:
 
     with tracer.start_span("get-engine") as span:
         pool = await get_engine()
-    
+
     with tracer.start_as_current_span("pool-connect"):
         async with pool.connect() as conn:
             with tracer.start_as_current_span("pool-execute"):

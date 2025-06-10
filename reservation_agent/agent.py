@@ -1,17 +1,11 @@
 # agent.py
 from google.adk.agents import LlmAgent
-from google.adk.agents.callback_context import CallbackContext
-from google.adk.tools import FunctionTool
 
 from .tools import (
     get_latest_user_reservations,
-    get_user_id_from_context,
     get_user_reservation_by_id,
+    validate_oauth2_token,
 )
-
-async def setup_before_agent_call(callback_context: CallbackContext):
-    callback_context.state["user_id"] = "user_123"
-
 
 root_agent = LlmAgent(
     model="gemini-2.5-pro-preview-03-25",
@@ -32,5 +26,5 @@ root_agent = LlmAgent(
         get_latest_user_reservations,
         get_user_reservation_by_id,
     ],
-    before_agent_callback=setup_before_agent_call,
+    before_agent_callback=validate_oauth2_token,
 )
