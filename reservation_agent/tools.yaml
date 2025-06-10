@@ -1,0 +1,55 @@
+authServices:
+  my-google-auth:
+    kind: google
+    clientId: $MY_GOOGLE_CLIENT_ID}
+sources:
+  my-cloud-sql-pg-source:
+      kind: cloud-sql-postgres
+      project: ${GOOGLE_CLOUD_PROJECT}
+      region: ${GOOGLE_CLOUD_LOCATION}
+      instance: ${CLOUD_SQL_INSTANCE}
+      database: ${DB_NAME}
+      user: ${DB_USER}
+      password: ${DB_PASSWORD}
+tools:
+  get_user_reservation_by_id:
+    source: my-cloud-sql-pg-source
+    kind: postgres-sql
+    description: >
+      Fetches a specific reservation for the authenticated user using its
+      unique reservation ID. Use this if the user provides a reservation ID or
+      asks for details of one specific reservation. 
+    statement: |
+      SELECT id, user_id, reservation_details, reservation_date
+      FROM reservations
+      WHERE id = $1 AND user_id = $2
+    parameters:
+      - name: reservation_id_param
+        type: integer
+        description: "The unique identifier for the reservation."
+      - name: user_id
+        type: integer
+        description: "The unique identifier for the user who made the reservation."
+        authServices:
+          - name: my-google-auth
+            field: user_id
+  get_latest_user_reservations:
+    source: my-cloud-sql-pg-source
+    kind: postgres-sql
+    description: >
+      Fetches the 3 most recent reservations for the authenticated user.
+      Use this if the user asks for their latest, newest, or recent
+      reservations.
+    statement: |
+      SELECT id, user_id, reservation_details, reservation_date
+      FROM reservations
+      WHERE user_id = $1
+      ORDER BY reservation_date DESC
+      LIMIT 3
+    parameters:
+      - name: user_id
+        type: integer
+        description: "The unique identifier for the user who made the reservation."
+        authServices:
+          - name: my-google-auth
+            field: user_id
